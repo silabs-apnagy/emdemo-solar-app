@@ -1,0 +1,16 @@
+---
+parameters: []
+constants:
+- name: "workspace_name"
+  value: "MatterSolarPanelSolution"
+- path: "MatterSolarPanelOverThread/MatterSolarPanelOverThread.slpb"
+- path: "Matter-Bootloader_2/Matter-Bootloader_2.slpb"
+steps:
+- task: "convert"
+  output: "artifact/{{workspace_name}}-full.s37"
+  input:
+  - "{{bootloader_binary}}"
+  - "{{application_binary}}"
+- task: "create_gbl"
+  output: "artifact/{{workspace_name}}-app-only.gbl"
+  app: "{{application_binary}}"

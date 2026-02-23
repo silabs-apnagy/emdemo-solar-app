@@ -1,4 +1,0 @@
-/Users/apnagy/SimplicityStudio/v6_workspace/MatterSolarPanelSolution/MatterSolarPanelOverThread/cmake_gcc/build/CMakeFiles/slc.dir
-/Users/apnagy/SimplicityStudio/v6_workspace/MatterSolarPanelSolution/MatterSolarPanelOverThread/cmake_gcc/build/CMakeFiles/MatterSolarPanelOverThread.dir
-/Users/apnagy/SimplicityStudio/v6_workspace/MatterSolarPanelSolution/MatterSolarPanelOverThread/cmake_gcc/build/CMakeFiles/edit_cache.dir
-/Users/apnagy/SimplicityStudio/v6_workspace/MatterSolarPanelSolution/MatterSolarPanelOverThread/cmake_gcc/build/CMakeFiles/rebuild_cache.dir

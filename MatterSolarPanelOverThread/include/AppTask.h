@@ -59,6 +59,13 @@ public:
 
     static AppTask & GetAppTask() { return sAppTask; }
 
+     enum class WeatherCondition : uint8_t
+    {
+        kClear  = 0,
+        kCloudy = 1,
+        kNight  = 2,
+    };
+
     /**
      * @brief AppTask task main loop function
      *
@@ -96,7 +103,11 @@ public:
      *        Use the EventHandler structure to be used as a callback the Application events.
      */
     static void OccupancyAttributeUpdateEvent(AppEvent * event);
-    
+
+    static const char * WeatherToString(WeatherCondition condition);    
+    static WeatherCondition GetWeather();
+
+    void RequestDemoScreenRefresh();
 
     
 
@@ -124,13 +135,6 @@ private:
     static void UpdateGeneratedQuantitites(intptr_t);
 
     static AppTask sAppTask;
-
-    enum class WeatherCondition : uint8_t
-    {
-        kClear  = 0,
-        kCloudy = 1,
-        kNight  = 2,
-    };
 
     static WeatherCondition sWeather;
     static TimerHandle_t sGenerationTimer;

@@ -204,24 +204,7 @@ CHIP_ERROR AppTask::AppInit()
     sAppLed.Init(kAppLedId);
     sAppLed.Set(sWeather == WeatherCondition::kClear);
 
-    //srand(1);
-
-    // Update the LCD with the Stored value. Show QR Code if not provisioned
-#ifdef DISPLAY_ENABLED
-    //GetLCD().WriteDemoUI(LightMgr().IsLightOn());
-#ifdef QR_CODE_ENABLED
-#ifdef SL_WIFI
-    if (!ConnectivityMgr().IsWiFiStationProvisioned())
-#else
-    if (!ConnectivityMgr().IsThreadProvisioned())
-#endif /* !SL_WIFI */
-    {
-        GetLCD().ShowQRCode(true);
-    }
-#endif // QR_CODE_ENABLED
-#endif
-
-
+    
 #ifdef DISPLAY_ENABLED
     // Install a custom UI renderer for the Demo screen.
     GetLCD().SetCustomUI(DrawCustomDemoUI);

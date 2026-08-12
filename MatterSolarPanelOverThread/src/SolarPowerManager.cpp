@@ -11,7 +11,7 @@
 #include <ElectricalPowerMeasurementDelegate.h>
 #include <PowerTopologyDelegate.h>
 
-#include <ElectricalEnergyMeasurementCluster.h>
+#include <app/clusters/electrical-energy-measurement-server/CodegenIntegration.h>
 #include "power-source-server.h"
 
 #include "Server.h"
@@ -98,6 +98,11 @@ void Shutdown(void)
     {
         gPTDelegate.reset();
     }
+    if (gEEMAttrAccess)
+    {
+        gEEMAttrAccess->Shutdown();
+        gEEMAttrAccess.reset();
+    }
 }
 
 void UpdatePowerReading(int voltage_V, int current_mA, int power_mW)
@@ -109,50 +114,28 @@ void UpdatePowerReading(int voltage_V, int current_mA, int power_mW)
 
 void SendPeriodicEnergyReading(uint64_t periodic_energy)
 {
-	MeasurementData* data = MeasurementDataForEndpoint(solar_power_endpoint);
-	if(!data){
-		//log failure?
-		return;
-	}
-	EnergyMeasurementStruct::Type energyImported;
 	EnergyMeasurementStruct::Type energyExported;
 	energyExported.startTimestamp.ClearValue();
 	energyExported.startSystime.ClearValue();
-	if (data->periodicExported.HasValue())
-	{
-		energyExported.startTimestamp = data->periodicExported.Value().endTimestamp;
-		energyExported.startSystime   = data->periodicExported.Value().endSystime;
-	}
 	energyExported.energy = periodic_energy;
 	System::Clock::Milliseconds64 system_time_ms = std::chrono::duration_cast<System::Clock::Milliseconds64>(chip::Server::GetInstance().TimeSinceInit());
 	uint64_t nowMS = static_cast<uint64_t>(system_time_ms.count());
 	energyExported.endSystime.SetValue(nowMS);
-	if(!NotifyPeriodicEnergyMeasured(solar_power_endpoint, MakeOptional(energyImported), MakeOptional(energyExported))){
+	if(!NotifyPeriodicEnergyMeasured(solar_power_endpoint, NullNullable, MakeNullable(energyExported))){
 		//log failure?
 	}
 	MatterReportingAttributeChangeCallback(solar_power_endpoint, ElectricalEnergyMeasurement::Id, ElectricalEnergyMeasurement::Attributes::PeriodicEnergyExported::Id);
 }
 void SendCumulativeEnergyReading(uint64_t cumulative_energy)
 {
-	MeasurementData* data = MeasurementDataForEndpoint(solar_power_endpoint);
-	if(!data){
-		//log failure?
-		return;
-	}
-	EnergyMeasurementStruct::Type energyImported;
 	EnergyMeasurementStruct::Type energyExported;
 	energyExported.startTimestamp.ClearValue();
 	energyExported.startSystime.ClearValue();
-	if (data->periodicExported.HasValue())
-	{
-		energyExported.startTimestamp = data->periodicExported.Value().endTimestamp;
-		energyExported.startSystime   = data->periodicExported.Value().endSystime;
-	}
 	energyExported.energy = cumulative_energy;
 	System::Clock::Milliseconds64 system_time_ms = std::chrono::duration_cast<System::Clock::Milliseconds64>(chip::Server::GetInstance().TimeSinceInit());
 	uint64_t nowMS = static_cast<uint64_t>(system_time_ms.count());
 	energyExported.endSystime.SetValue(nowMS);
-	if(!NotifyCumulativeEnergyMeasured(solar_power_endpoint, MakeOptional(energyImported), MakeOptional(energyExported))){
+	if(!NotifyCumulativeEnergyMeasured(solar_power_endpoint, NullNullable, MakeNullable(energyExported))){
 		//log failure?
 	}
 	MatterReportingAttributeChangeCallback(solar_power_endpoint, ElectricalEnergyMeasurement::Id, ElectricalEnergyMeasurement::Attributes::CumulativeEnergyExported::Id);
@@ -210,7 +193,8 @@ CHIP_ERROR InitEnergyMeasurement(EndpointId endpoint)
 					ElectricalEnergyMeasurement::Feature::kCumulativeEnergy,
 					ElectricalEnergyMeasurement::Feature::kPeriodicEnergy),
 			BitMask<ElectricalEnergyMeasurement::OptionalAttributes, uint32_t>(
-					ElectricalEnergyMeasurement::OptionalAttributes::kOptionalAttributeCumulativeEnergyReset));
+					ElectricalEnergyMeasurement::OptionalAttributes::kOptionalAttributeCumulativeEnergyReset),
+			endpoint);
 
 	// Create an accuracy entry which is between +/-0.5 and +/- 5% across the range of all possible energy readings
 	ElectricalEnergyMeasurement::Structs::MeasurementAccuracyRangeStruct::Type energyAccuracyRanges[] = {
@@ -242,7 +226,7 @@ CHIP_ERROR InitEnergyMeasurement(EndpointId endpoint)
 		gEEMAttrAccess->Init();
 
 		ElectricalEnergyMeasurement::SetMeasurementAccuracy(endpoint, accuracy);
-		ElectricalEnergyMeasurement::SetCumulativeReset(endpoint, MakeOptional(resetStruct));
+		ElectricalEnergyMeasurement::SetCumulativeReset(endpoint, MakeNullable(resetStruct));
 	}
 	return CHIP_NO_ERROR;
 }
@@ -264,8 +248,7 @@ CHIP_ERROR InitPowerTopology(EndpointId endpoint)
 	}
 
 	gPTInstance = std::make_unique<PowerTopologyInstance>(
-			EndpointId(endpoint), *gPTDelegate, BitMask<PowerTopology::Feature, uint32_t>(PowerTopology::Feature::kNodeTopology),
-			BitMask<PowerTopology::OptionalAttributes, uint32_t>(0));
+			EndpointId(endpoint), *gPTDelegate, BitMask<PowerTopology::Feature, uint32_t>(PowerTopology::Feature::kNodeTopology));
 
 	if (!gPTInstance)
 	{

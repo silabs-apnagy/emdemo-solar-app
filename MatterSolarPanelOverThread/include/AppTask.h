@@ -24,7 +24,6 @@
 
 #include "AppEvent.h"
 #include "BaseApplication.h"
-#include <app/clusters/occupancy-sensor-server/occupancy-sensor-server.h>
 #include <ble/BLEEndPoint.h>
 #include <lib/core/CHIPError.h>
 #include <memory>
@@ -97,12 +96,6 @@ public:
      *        Use the EventHandler structure to be used as a callback the Application events.
      */
     static void SensorAttributeUpdateEvent(AppEvent * event);
-
-    /**
-     * @brief Triggers necessary updates when the Occupancy values have been changed.
-     *        Use the EventHandler structure to be used as a callback the Application events.
-     */
-    static void OccupancyAttributeUpdateEvent(AppEvent * event);
 
     static const char * WeatherToString(WeatherCondition condition);    
     static WeatherCondition GetWeather();

@@ -39,18 +39,14 @@ public:
 class PowerTopologyInstance : public Instance
 {
 public:
-    PowerTopologyInstance(EndpointId ep, PowerTopologyDelegate & aDelegate,
-                          BitMask<Feature> features,
-                          BitMask<OptionalAttributes> optionalAttrs = BitMask<OptionalAttributes>())
-        : Instance(ep, aDelegate, features, optionalAttrs)
+    PowerTopologyInstance(EndpointId ep, PowerTopologyDelegate & aDelegate, BitMask<Feature> features)
+        : Instance(ep, aDelegate, features)
     {
         mDelegate = &aDelegate;     
     }
 
     PowerTopologyInstance(EndpointId ep, PowerTopologyDelegate & aDelegate, PowerTopology::Feature feature)
-    : PowerTopology::Instance(ep, aDelegate,
-            BitMask<PowerTopology::Feature>().Set(feature),
-            BitMask<PowerTopology::OptionalAttributes>() /* none */)
+    : PowerTopology::Instance(ep, aDelegate, BitMask<PowerTopology::Feature>().Set(feature))
     {
         mDelegate = &aDelegate;
     }

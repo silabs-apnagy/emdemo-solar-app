@@ -32,6 +32,9 @@
 #include <setup_payload/SetupPayload.h>
 #include <setup_payload/OnboardingCodesUtil.h>
 
+#include <app/clusters/mode-select-server/supported-modes-manager.h>
+#include <app/data-model/List.h>
+
 #include "FreeRTOS.h"
 #include "queue.h"
 
@@ -39,6 +42,8 @@
 //#include "PlatformManager.h"
 #include "Accessors.h"
 #include <lib/support/CHIPMem.h>
+#include <lib/shell/Engine.h>
+#include <cstring>
 
 // FreeRTOS
 #include "FreeRTOS.h"
@@ -133,7 +138,114 @@ using namespace ::chip::DeviceLayer::Silabs;
 
 namespace {
 
-EndpointId solar_power_endpoint = 1;
+
+using SolarModeOption = ModeSelect::Structs::ModeOptionStruct::Type;
+using SolarSemanticTag = ModeSelect::Structs::SemanticTagStruct::Type;
+using Status = chip::Protocols::InteractionModel::Status;
+using chip::Shell::Engine;
+using chip::Shell::shell_command_t;
+
+constexpr EndpointId solar_power_endpoint = 1;
+
+const SolarModeOption kSolarModes[] = {
+    {
+        .label = "Clear"_span,
+        .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kClear),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+    {
+        .label = "Cloudy"_span,
+        .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kCloudy),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+    {
+        .label = "Night"_span,
+        .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kNight),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+};
+
+class SolarSupportedModesManager final : public ModeSelect::SupportedModesManager
+{
+public:
+    ModeOptionsProvider getModeOptionsProvider(EndpointId endpointId) const override
+    {
+        if (endpointId != solar_power_endpoint)
+        {
+            return {};
+        }
+
+        return { kSolarModes, kSolarModes + 3 };
+    }
+
+    Status getModeOptionByMode(
+        EndpointId endpointId,
+        uint8_t mode,
+        const SolarModeOption ** option) const override
+    {
+        if (option == nullptr)
+        {
+            return Status::Failure;
+        }
+
+        *option = nullptr;
+
+        if (endpointId != solar_power_endpoint)
+        {
+            return Status::UnsupportedCluster;
+        }
+
+        for (const auto & candidate : kSolarModes)
+        {
+            if (candidate.mode == mode)
+            {
+                *option = &candidate;
+                return Status::Success;
+            }
+        }
+
+        return Status::InvalidCommand;
+    }
+};
+
+SolarSupportedModesManager gSolarSupportedModesManager;
+
+CHIP_ERROR SolarModeCommand(int argc, char ** argv)
+{
+    if (argc != 1)
+    {
+        ChipLogError(Shell, "Usage: solar-mode <clear|cloudy|night>");
+        return CHIP_ERROR_INVALID_ARGUMENT;
+    }
+
+    uint8_t mode;
+    if (std::strcmp(argv[0], "clear") == 0)
+    {
+        mode = static_cast<uint8_t>(AppTask::WeatherCondition::kClear);
+    }
+    else if (std::strcmp(argv[0], "cloudy") == 0)
+    {
+        mode = static_cast<uint8_t>(AppTask::WeatherCondition::kCloudy);
+    }
+    else if (std::strcmp(argv[0], "night") == 0)
+    {
+        mode = static_cast<uint8_t>(AppTask::WeatherCondition::kNight);
+    }
+    else
+    {
+        ChipLogError(Shell, "Unknown solar mode '%s'; use clear, cloudy, or night", argv[0]);
+        return CHIP_ERROR_INVALID_ARGUMENT;
+    }
+
+    AppTask::PostWeatherMode(mode, true);
+    return CHIP_NO_ERROR;
+}
+
+const shell_command_t kSolarModeCommand = {
+    &SolarModeCommand,
+    "solar-mode",
+    "Set solar output mode: solar-mode <clear|cloudy|night>",
+};
 
 constexpr uint32_t update_period_seconds = 1;
 LEDWidget sAppLed;
@@ -190,6 +302,8 @@ TimerHandle_t AppTask::sGenerationTimer = nullptr;
 CHIP_ERROR AppTask::AppInit()
 {
     CHIP_ERROR err = CHIP_NO_ERROR;
+    ModeSelect::setSupportedModesManager(&gSolarSupportedModesManager);
+    Engine::Root().RegisterCommands(&kSolarModeCommand, 1);
     chip::DeviceLayer::Silabs::GetPlatform().SetButtonsCb(AppTask::ButtonEventHandler);
 
     DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t ctx) {
@@ -311,23 +425,67 @@ void AppTask::ProccessButtonEvent(AppEvent* event)
 	VerifyOrReturn(event->Type == AppEvent::kEventType_Button);
 
 	// Cycle weather conditions on APP_SWITCH_BUTTON press.
+    WeatherCondition nextWeather;
     switch (sWeather)
     {
     case WeatherCondition::kClear:
-        sWeather = WeatherCondition::kCloudy;
+        nextWeather = WeatherCondition::kCloudy;
         break;
     case WeatherCondition::kCloudy:
-        sWeather = WeatherCondition::kNight;
+        nextWeather = WeatherCondition::kNight;
         break;
     case WeatherCondition::kNight:
     default:
-        sWeather = WeatherCondition::kClear;
+        nextWeather = WeatherCondition::kClear;
         break;
     }
-    GetAppTask().RequestDemoScreenRefresh();
+    PostWeatherMode(static_cast<uint8_t>(nextWeather), true);
+}
 
-    // LED is ON only for Clear conditions.
-    sAppLed.Set(sWeather == WeatherCondition::kClear);
+void AppTask::PostWeatherMode(uint8_t mode, bool updateMatterAttribute)
+{
+    AppEvent event = {};
+    event.Type = AppEvent::kEventType_WeatherMode;
+    event.WeatherModeEvent.Mode = mode;
+    event.WeatherModeEvent.UpdateMatterAttribute = updateMatterAttribute;
+    event.Handler = WeatherModeEventHandler;
+    GetAppTask().PostEvent(&event);
+}
+
+void AppTask::WeatherModeEventHandler(AppEvent * event)
+{
+    VerifyOrReturn(event != nullptr && event->Type == AppEvent::kEventType_WeatherMode);
+
+    const uint8_t mode = event->WeatherModeEvent.Mode;
+    if (mode > static_cast<uint8_t>(WeatherCondition::kNight))
+    {
+        ChipLogError(AppServer, "Ignoring unsupported solar mode value %u", mode);
+        return;
+    }
+
+    const WeatherCondition requestedWeather = static_cast<WeatherCondition>(mode);
+    if (sWeather != requestedWeather)
+    {
+        sWeather = requestedWeather;
+        sAppLed.Set(sWeather == WeatherCondition::kClear);
+        GetAppTask().RequestDemoScreenRefresh();
+    }
+
+    if (event->WeatherModeEvent.UpdateMatterAttribute)
+    {
+        const CHIP_ERROR err = DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t context) {
+            const uint8_t requestedMode = static_cast<uint8_t>(context);
+            const Status status = ModeSelect::Attributes::CurrentMode::Set(solar_power_endpoint, requestedMode);
+            if (status != Status::Success)
+            {
+                ChipLogError(AppServer, "Failed to set ModeSelect CurrentMode: status %u", to_underlying(status));
+            }
+        }, static_cast<intptr_t>(mode));
+        if (err != CHIP_NO_ERROR)
+        {
+            ChipLogError(AppServer, "Failed to schedule ModeSelect CurrentMode update: %s", ErrorStr(err));
+        }
+    }
 }
 
 void AppTask::GenerationTimerCallback(TimerHandle_t)

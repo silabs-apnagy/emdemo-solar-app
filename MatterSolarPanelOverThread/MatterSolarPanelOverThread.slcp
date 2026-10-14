@@ -28,10 +28,10 @@ toolchain_settings:
 component:
 - package: matter
   vendor: silabs
-  id: codegen_data_model_sources
+  id: app_common
 - package: matter
   vendor: silabs
-  id: app_common
+  id: codegen_data_model_sources
 - package: matter
   vendor: silabs
   id: matter
@@ -86,6 +86,9 @@ component:
 - package: matter
   vendor: silabs
   id: matter_log_uart
+- package: matter
+  vendor: silabs
+  id: matter_mode_select
 - package: matter
   vendor: silabs
   id: matter_network_commissioning
@@ -1282,3 +1285,4 @@ sdk_extension:
 post_build:
 - path: MatterSolarPanelOverThread.slpb
   profile: application
+

@@ -31,6 +31,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+
 #include "FreeRTOS.h"
 #include "timers.h"
 
@@ -64,6 +65,10 @@ public:
         kCloudy = 1,
         kNight  = 2,
     };
+
+    static_assert(static_cast<uint8_t>(WeatherCondition::kClear) == 0);
+    static_assert(static_cast<uint8_t>(WeatherCondition::kCloudy) == 1);
+    static_assert(static_cast<uint8_t>(WeatherCondition::kNight) == 2);
 
     /**
      * @brief AppTask task main loop function
@@ -99,6 +104,7 @@ public:
 
     static const char * WeatherToString(WeatherCondition condition);    
     static WeatherCondition GetWeather();
+    static void PostWeatherMode(uint8_t mode, bool updateMatterAttribute);
 
     void RequestDemoScreenRefresh();
 
@@ -120,6 +126,7 @@ private:
 
     // AppTask event handler (runs on the AppTask thread). Computes new readings outside the CHIP stack.
     static void GenerationTickEventHandler(AppEvent * event);
+    static void WeatherModeEventHandler(AppEvent * event);
 
      // CHIP-thread work item that pushes readings into Matter clusters.
     static void ApplyMatterReadings(intptr_t context);

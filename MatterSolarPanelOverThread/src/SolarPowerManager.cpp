@@ -107,7 +107,7 @@ void Shutdown(void)
 
 void UpdatePowerReading(int voltage_V, int current_mA, int power_mW)
 {
-	gEPMDelegate->SetVoltage(voltage_V);
+	gEPMDelegate->SetVoltage(voltage_V*1000);
 	gEPMDelegate->SetActiveCurrent(current_mA);
 	gEPMDelegate->SetActivePower(power_mW);
 }

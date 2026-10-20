@@ -1,3 +1,8 @@
+# Solar Panel Solution
+
+See [conference MVP status](CONFERENCE_MVP.md) for the current preview behavior,
+build/flash caveats, and super-repo handoff.
+
 ## Clone
 
 ```bash

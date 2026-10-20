@@ -12,5 +12,7 @@
     <properties key="universalConfig.projectTypeIds" value="visual-studio-code"/>
     <properties key="projectCommon.importModeId" value="LINK_LIBRARIES"/>
     <properties key="universalConfig.compSelProjInstanceId" value="1770929405704"/>
+    <properties key="universalConfig.filteredToolchains" value="iar llvm gcc"/>
+    <properties key="universalConfig.ucProjectCacheState" value="1587945753"/>
   </descriptors>
 </model:MDescriptors>

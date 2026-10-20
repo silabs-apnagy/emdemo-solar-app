@@ -44,6 +44,7 @@
 #include <lib/support/CHIPMem.h>
 #include <lib/shell/Engine.h>
 #include <cstring>
+#include <cstdlib>
 
 // FreeRTOS
 #include "FreeRTOS.h"
@@ -146,21 +147,69 @@ using chip::Shell::Engine;
 using chip::Shell::shell_command_t;
 
 constexpr EndpointId solar_power_endpoint = 1;
+constexpr EndpointId weather_endpoint = 2;
 
-const SolarModeOption kSolarModes[] = {
+// Solar demo defaults: edit these together when tuning the simulated session.
+constexpr uint32_t kUpdatePeriodSeconds = 1;
+constexpr uint32_t kEnergyReportPeriodSeconds = 10; // Keep power live without emitting energy events every second.
+static_assert(kEnergyReportPeriodSeconds >= kUpdatePeriodSeconds, "Energy reporting must not outpace sampling");
+constexpr uint32_t kProfileRampSeconds = 1 * 60; // Dawn-to-peak and peak-to-dusk make a ~2 minute session.
+constexpr uint32_t kNominalPeakPower_W = 4000;
+constexpr uint32_t kDawnMinPower_W = 400;
+constexpr uint32_t kDawnMaxPower_W = 1100;
+constexpr uint32_t kDuskMinPower_W = 400;
+constexpr uint32_t kDuskMaxPower_W = 1100;
+constexpr uint32_t kPeakMinPower_W = 3700;
+constexpr uint32_t kPeakMaxPower_W = kNominalPeakPower_W;
+constexpr uint16_t kClearMultiplierPermille = 1000;
+constexpr uint16_t kOvercastMultiplierPermille = 400;
+constexpr uint32_t kDipCheckIntervalSeconds = 30;
+constexpr uint16_t kClearDipProbabilityPermille = 50;    // 5% each check
+constexpr uint16_t kOvercastDipProbabilityPermille = 800; // 80% each check
+constexpr uint16_t kClearDipMultiplierPermille = 800;     // 80% of weather-adjusted output
+constexpr uint16_t kOvercastDipMultiplierPermille = 150;  // 15% of weather-adjusted output
+constexpr uint32_t kDipHoldMinSeconds = 10;
+constexpr uint32_t kDipHoldMaxSeconds = 30;
+constexpr uint32_t kDipRampMinSeconds = 1;
+constexpr uint32_t kDipRampMaxSeconds = 3;
+
+uint32_t RandomBetween(uint32_t minimum, uint32_t maximum)
+{
+    return minimum + static_cast<uint32_t>(std::rand()) % (maximum - minimum + 1);
+}
+
+const SolarModeOption kDayProfileModes[] = {
+    {
+        .label = "Dawn"_span,
+        .mode = static_cast<uint8_t>(AppTask::DayProfile::kDawn),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+    {
+        .label = "Peak"_span,
+        .mode = static_cast<uint8_t>(AppTask::DayProfile::kPeak),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+    {
+        .label = "Dusk"_span,
+        .mode = static_cast<uint8_t>(AppTask::DayProfile::kDusk),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+    {
+        .label = "Night"_span,
+        .mode = static_cast<uint8_t>(AppTask::DayProfile::kNight),
+        .semanticTags = DataModel::List<const SolarSemanticTag>{},
+    },
+};
+
+const SolarModeOption kWeatherModes[] = {
     {
         .label = "Clear"_span,
         .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kClear),
         .semanticTags = DataModel::List<const SolarSemanticTag>{},
     },
     {
-        .label = "Cloudy"_span,
-        .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kCloudy),
-        .semanticTags = DataModel::List<const SolarSemanticTag>{},
-    },
-    {
-        .label = "Night"_span,
-        .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kNight),
+        .label = "Overcast"_span,
+        .mode = static_cast<uint8_t>(AppTask::WeatherCondition::kOvercast),
         .semanticTags = DataModel::List<const SolarSemanticTag>{},
     },
 };
@@ -170,12 +219,11 @@ class SolarSupportedModesManager final : public ModeSelect::SupportedModesManage
 public:
     ModeOptionsProvider getModeOptionsProvider(EndpointId endpointId) const override
     {
-        if (endpointId != solar_power_endpoint)
-        {
-            return {};
-        }
-
-        return { kSolarModes, kSolarModes + 3 };
+        if (endpointId == solar_power_endpoint)
+            return { kDayProfileModes, kDayProfileModes + 4 };
+        if (endpointId == weather_endpoint)
+            return { kWeatherModes, kWeatherModes + 2 };
+        return {};
     }
 
     Status getModeOptionByMode(
@@ -190,16 +238,28 @@ public:
 
         *option = nullptr;
 
-        if (endpointId != solar_power_endpoint)
+        const SolarModeOption * begin = nullptr;
+        const SolarModeOption * end = nullptr;
+        if (endpointId == solar_power_endpoint)
+        {
+            begin = kDayProfileModes;
+            end = kDayProfileModes + 4;
+        }
+        else if (endpointId == weather_endpoint)
+        {
+            begin = kWeatherModes;
+            end = kWeatherModes + 2;
+        }
+        else
         {
             return Status::UnsupportedCluster;
         }
 
-        for (const auto & candidate : kSolarModes)
+        for (const SolarModeOption * candidate = begin; candidate != end; ++candidate)
         {
-            if (candidate.mode == mode)
+            if (candidate->mode == mode)
             {
-                *option = &candidate;
+                *option = candidate;
                 return Status::Success;
             }
         }
@@ -214,29 +274,48 @@ CHIP_ERROR SolarModeCommand(int argc, char ** argv)
 {
     if (argc != 1)
     {
-        ChipLogError(Shell, "Usage: solar-mode <clear|cloudy|night>");
+        ChipLogError(Shell, "Usage: solar-mode <dawn|peak|dusk|night>");
         return CHIP_ERROR_INVALID_ARGUMENT;
     }
 
     uint8_t mode;
-    if (std::strcmp(argv[0], "clear") == 0)
+    if (std::strcmp(argv[0], "dawn") == 0)
     {
-        mode = static_cast<uint8_t>(AppTask::WeatherCondition::kClear);
+        mode = static_cast<uint8_t>(AppTask::DayProfile::kDawn);
     }
-    else if (std::strcmp(argv[0], "cloudy") == 0)
+    else if (std::strcmp(argv[0], "peak") == 0)
     {
-        mode = static_cast<uint8_t>(AppTask::WeatherCondition::kCloudy);
+        mode = static_cast<uint8_t>(AppTask::DayProfile::kPeak);
+    }
+    else if (std::strcmp(argv[0], "dusk") == 0)
+    {
+        mode = static_cast<uint8_t>(AppTask::DayProfile::kDusk);
     }
     else if (std::strcmp(argv[0], "night") == 0)
     {
-        mode = static_cast<uint8_t>(AppTask::WeatherCondition::kNight);
+        mode = static_cast<uint8_t>(AppTask::DayProfile::kNight);
     }
     else
     {
-        ChipLogError(Shell, "Unknown solar mode '%s'; use clear, cloudy, or night", argv[0]);
+        ChipLogError(Shell, "Unknown day profile '%s'; use dawn, peak, dusk, or night", argv[0]);
         return CHIP_ERROR_INVALID_ARGUMENT;
     }
 
+    AppTask::PostDayProfileMode(mode, true);
+    return CHIP_NO_ERROR;
+}
+
+CHIP_ERROR SolarWeatherCommand(int argc, char ** argv)
+{
+    if (argc != 1 || (std::strcmp(argv[0], "clear") != 0 && std::strcmp(argv[0], "overcast") != 0))
+    {
+        ChipLogError(Shell, "Usage: solar-weather <clear|overcast>");
+        return CHIP_ERROR_INVALID_ARGUMENT;
+    }
+
+    const uint8_t mode = (std::strcmp(argv[0], "clear") == 0)
+        ? static_cast<uint8_t>(AppTask::WeatherCondition::kClear)
+        : static_cast<uint8_t>(AppTask::WeatherCondition::kOvercast);
     AppTask::PostWeatherMode(mode, true);
     return CHIP_NO_ERROR;
 }
@@ -244,10 +323,15 @@ CHIP_ERROR SolarModeCommand(int argc, char ** argv)
 const shell_command_t kSolarModeCommand = {
     &SolarModeCommand,
     "solar-mode",
-    "Set solar output mode: solar-mode <clear|cloudy|night>",
+    "Set solar day profile: solar-mode <dawn|peak|dusk|night>",
 };
 
-constexpr uint32_t update_period_seconds = 1;
+const shell_command_t kSolarWeatherCommand = {
+    &SolarWeatherCommand,
+    "solar-weather",
+    "Set solar weather: solar-weather <clear|overcast>",
+};
+
 LEDWidget sAppLed;
 
 #define APP_FUNCTION_BUTTON 0
@@ -269,7 +353,7 @@ static const uint8_t networkBitMap[] = { THREAD_BITMAP };
 void DrawCustomDemoUI(GLIB_Context_t * context)
 {
     uint8_t lineNb = 5;
-    char str[20];
+    char str[24];
 
     
 
@@ -283,13 +367,15 @@ void DrawCustomDemoUI(GLIB_Context_t * context)
     
     sprintf(str, "Solar Panel");
     GLIB_drawStringOnLine(LCD_CTX(), str, lineNb++, GLIB_ALIGN_CENTER, 0, 0, true);
-    lineNb++; //empty lines
-    lineNb++; //empty lines
-    auto weather = AppTask::GetWeather();
-    sprintf(str, AppTask::WeatherToString(weather));
+    lineNb++; //empty line
+    snprintf(str, sizeof(str), "Day:");
     GLIB_drawStringOnLine(LCD_CTX(), str, lineNb++, GLIB_ALIGN_CENTER, 0, 0, true);
-    //sprintf(str, "ct/kWh");
-    //GLIB_drawStringOnLine(LCD_CTX(), str, lineNb++, GLIB_ALIGN_CENTER, 0, 0, true);
+    snprintf(str, sizeof(str), "%s", AppTask::DayProfileToString(AppTask::GetDayProfile()));
+    GLIB_drawStringOnLine(LCD_CTX(), str, lineNb++, GLIB_ALIGN_CENTER, 0, 0, true);
+    snprintf(str, sizeof(str), "Weather:");
+    GLIB_drawStringOnLine(LCD_CTX(), str, lineNb++, GLIB_ALIGN_CENTER, 0, 0, true);
+    snprintf(str, sizeof(str), "%s", AppTask::WeatherToString(AppTask::GetWeather()));
+    GLIB_drawStringOnLine(LCD_CTX(), str, lineNb++, GLIB_ALIGN_CENTER, 0, 0, true);
 
     updateDisplay();
 }
@@ -297,16 +383,173 @@ void DrawCustomDemoUI(GLIB_Context_t * context)
 } // namespace
 
 AppTask AppTask::sAppTask;
+AppTask::DayProfile AppTask::sDayProfile = AppTask::DayProfile::kPeak;
 AppTask::WeatherCondition AppTask::sWeather = AppTask::WeatherCondition::kClear;
 TimerHandle_t AppTask::sGenerationTimer = nullptr;
+
+namespace {
+
+uint32_t sProfilePower_W = 0;
+uint32_t sSelectedProfilePower_W = 0;
+uint32_t sProfileRampStart_W = 0;
+uint32_t sProfileRampTarget_W = 0;
+uint32_t sProfileRampElapsedSeconds = 0;
+uint32_t sDipCheckElapsedSeconds = 0;
+uint32_t sDipStageElapsedSeconds = 0;
+uint32_t sDipStageDurationSeconds = 0;
+uint32_t sDipHoldRemainingSeconds = 0;
+uint16_t sDipMultiplierPermille = 1000;
+uint16_t sDipTargetMultiplierPermille = 1000;
+uint64_t sEnergyRemainder_mWSeconds = 0;
+uint64_t sPendingPeriodicEnergy_mWh = 0;
+uint32_t sEnergyReportElapsedSeconds = 0;
+
+enum class DipStage : uint8_t
+{
+    kWaiting,
+    kRampingDown,
+    kHolding,
+    kRampingUp,
+};
+DipStage sDipStage = DipStage::kWaiting;
+
+uint32_t GetProfilePower_W(AppTask::DayProfile profile)
+{
+    switch (profile)
+    {
+    case AppTask::DayProfile::kDawn:
+        return RandomBetween(kDawnMinPower_W, kDawnMaxPower_W);
+    case AppTask::DayProfile::kPeak:
+        return RandomBetween(kPeakMinPower_W, kPeakMaxPower_W);
+    case AppTask::DayProfile::kDusk:
+        return RandomBetween(kDuskMinPower_W, kDuskMaxPower_W);
+    case AppTask::DayProfile::kNight:
+    default:
+        return 0;
+    }
+}
+
+uint32_t GetWeatherAdjustedProfilePower_W()
+{
+    const uint32_t multiplier = AppTask::GetWeather() == AppTask::WeatherCondition::kClear
+        ? kClearMultiplierPermille
+        : kOvercastMultiplierPermille;
+    return (sSelectedProfilePower_W * multiplier) / 1000;
+}
+
+void StartProfileRamp(bool selectNewDayProfile)
+{
+    if (selectNewDayProfile)
+    {
+        sSelectedProfilePower_W = GetProfilePower_W(AppTask::GetDayProfile());
+    }
+    sProfileRampStart_W = sProfilePower_W;
+    sProfileRampTarget_W = GetWeatherAdjustedProfilePower_W();
+    sProfileRampElapsedSeconds = 0;
+}
+
+void StartCloudDip()
+{
+    const bool clear = AppTask::GetWeather() == AppTask::WeatherCondition::kClear;
+    const uint16_t probability = clear ? kClearDipProbabilityPermille : kOvercastDipProbabilityPermille;
+    if (RandomBetween(0, 999) >= probability)
+    {
+        return;
+    }
+
+    sDipTargetMultiplierPermille = clear ? kClearDipMultiplierPermille : kOvercastDipMultiplierPermille;
+    sDipStage = DipStage::kRampingDown;
+    sDipStageDurationSeconds = RandomBetween(kDipRampMinSeconds, kDipRampMaxSeconds);
+    sDipStageElapsedSeconds = 0;
+}
+
+void AdvanceCloudDip()
+{
+    if (AppTask::GetDayProfile() == AppTask::DayProfile::kNight || sSelectedProfilePower_W == 0)
+    {
+        sDipStage = DipStage::kWaiting;
+        sDipCheckElapsedSeconds = 0;
+        sDipMultiplierPermille = 1000;
+        return;
+    }
+
+    switch (sDipStage)
+    {
+    case DipStage::kWaiting:
+        if (++sDipCheckElapsedSeconds >= kDipCheckIntervalSeconds)
+        {
+            sDipCheckElapsedSeconds = 0;
+            StartCloudDip();
+        }
+        break;
+    case DipStage::kRampingDown:
+        if (++sDipStageElapsedSeconds >= sDipStageDurationSeconds)
+        {
+            sDipMultiplierPermille = sDipTargetMultiplierPermille;
+            sDipHoldRemainingSeconds = RandomBetween(kDipHoldMinSeconds, kDipHoldMaxSeconds);
+            sDipStage = DipStage::kHolding;
+        }
+        else
+        {
+            const uint32_t progress = sDipStageElapsedSeconds;
+            const uint32_t duration = sDipStageDurationSeconds;
+            sDipMultiplierPermille = static_cast<uint16_t>(1000 - ((1000 - sDipTargetMultiplierPermille) * progress) / duration);
+        }
+        break;
+    case DipStage::kHolding:
+        if (sDipHoldRemainingSeconds > 0 && --sDipHoldRemainingSeconds == 0)
+        {
+            sDipStage = DipStage::kRampingUp;
+            sDipStageElapsedSeconds = 0;
+            sDipStageDurationSeconds = RandomBetween(kDipRampMinSeconds, kDipRampMaxSeconds);
+        }
+        break;
+    case DipStage::kRampingUp:
+        if (++sDipStageElapsedSeconds >= sDipStageDurationSeconds)
+        {
+            sDipMultiplierPermille = 1000;
+            sDipStage = DipStage::kWaiting;
+            sDipCheckElapsedSeconds = 0;
+        }
+        else
+        {
+            const uint32_t progress = sDipStageElapsedSeconds;
+            const uint32_t duration = sDipStageDurationSeconds;
+            sDipMultiplierPermille = static_cast<uint16_t>(sDipTargetMultiplierPermille + ((1000 - sDipTargetMultiplierPermille) * progress) / duration);
+        }
+        break;
+    }
+}
+
+} // namespace
+
 CHIP_ERROR AppTask::AppInit()
 {
     CHIP_ERROR err = CHIP_NO_ERROR;
     ModeSelect::setSupportedModesManager(&gSolarSupportedModesManager);
     Engine::Root().RegisterCommands(&kSolarModeCommand, 1);
+    Engine::Root().RegisterCommands(&kSolarWeatherCommand, 1);
     chip::DeviceLayer::Silabs::GetPlatform().SetButtonsCb(AppTask::ButtonEventHandler);
 
-    DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t ctx) {
+    StartProfileRamp(true);
+    err = DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
+        const Status dayStatus = ModeSelect::Attributes::CurrentMode::Set(solar_power_endpoint,
+            static_cast<uint8_t>(DayProfile::kPeak));
+        const Status weatherStatus = ModeSelect::Attributes::CurrentMode::Set(weather_endpoint,
+            static_cast<uint8_t>(WeatherCondition::kClear));
+        if (dayStatus != Status::Success || weatherStatus != Status::Success)
+        {
+            ChipLogError(AppServer, "Unable to initialize solar Mode Select attributes (day=%u, weather=%u)",
+                         to_underlying(dayStatus), to_underlying(weatherStatus));
+        }
+    }, 0);
+    if (err != CHIP_NO_ERROR)
+    {
+        ChipLogError(AppServer, "Failed to schedule initial Mode Select values: %s", ErrorStr(err));
+        return err;
+    }
+
+    err = DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t ctx) {
         CHIP_ERROR initErr = SolarPowerManager::Init(static_cast<EndpointId>(ctx));
         if (initErr != CHIP_NO_ERROR)
         {
@@ -314,6 +557,11 @@ CHIP_ERROR AppTask::AppInit()
             appError(initErr);
         }
     }, static_cast<intptr_t>(solar_power_endpoint));
+    if (err != CHIP_NO_ERROR)
+    {
+        ChipLogError(AppServer, "Failed to schedule SolarPowerManager initialization: %s", ErrorStr(err));
+        return err;
+    }
 
     sAppLed.Init(kAppLedId);
     sAppLed.Set(sWeather == WeatherCondition::kClear);
@@ -337,7 +585,7 @@ CHIP_ERROR AppTask::AppInit()
 #endif // QR_CODE_ENABLED
 #endif // DISPLAY_ENABLED
     sGenerationTimer = xTimerCreate("SolarGen",
-                                    pdMS_TO_TICKS(update_period_seconds * 1000),
+                                    pdMS_TO_TICKS(kUpdatePeriodSeconds * 1000),
                                     pdTRUE /* auto-reload */,
                                     nullptr,
                                     GenerationTimerCallback);
@@ -414,7 +662,7 @@ enum CurrentLevels {
 // Base “clear sky” generation (mA). Cloudy will be 30-40% of this. Night is 0.
 static constexpr int kClearCurrent_mA = 15000;
 
-static int sCurrentNoisy_mA = 0;
+static int sCurrent_mA = 0;
 static int sVoltage_V       = 230;
 static int sPower_mW        = 0;
 
@@ -424,63 +672,88 @@ void AppTask::ProccessButtonEvent(AppEvent* event)
 {
 	VerifyOrReturn(event->Type == AppEvent::kEventType_Button);
 
-	// Cycle weather conditions on APP_SWITCH_BUTTON press.
-    WeatherCondition nextWeather;
-    switch (sWeather)
-    {
-    case WeatherCondition::kClear:
-        nextWeather = WeatherCondition::kCloudy;
-        break;
-    case WeatherCondition::kCloudy:
-        nextWeather = WeatherCondition::kNight;
-        break;
-    case WeatherCondition::kNight:
-    default:
-        nextWeather = WeatherCondition::kClear;
-        break;
-    }
+	// PB1 toggles the weather mode independently of the day profile.
+    const WeatherCondition nextWeather = sWeather == WeatherCondition::kClear
+        ? WeatherCondition::kOvercast
+        : WeatherCondition::kClear;
     PostWeatherMode(static_cast<uint8_t>(nextWeather), true);
+}
+
+void AppTask::PostDayProfileMode(uint8_t mode, bool updateMatterAttribute)
+{
+    AppEvent event = {};
+    event.Type = AppEvent::kEventType_ModeSelect;
+    event.ModeSelectEvent.Endpoint = solar_power_endpoint;
+    event.ModeSelectEvent.Mode = mode;
+    event.ModeSelectEvent.UpdateMatterAttribute = updateMatterAttribute;
+    event.Handler = ModeSelectEventHandler;
+    GetAppTask().PostEvent(&event);
 }
 
 void AppTask::PostWeatherMode(uint8_t mode, bool updateMatterAttribute)
 {
     AppEvent event = {};
-    event.Type = AppEvent::kEventType_WeatherMode;
-    event.WeatherModeEvent.Mode = mode;
-    event.WeatherModeEvent.UpdateMatterAttribute = updateMatterAttribute;
-    event.Handler = WeatherModeEventHandler;
+    event.Type = AppEvent::kEventType_ModeSelect;
+    event.ModeSelectEvent.Endpoint = weather_endpoint;
+    event.ModeSelectEvent.Mode = mode;
+    event.ModeSelectEvent.UpdateMatterAttribute = updateMatterAttribute;
+    event.Handler = ModeSelectEventHandler;
     GetAppTask().PostEvent(&event);
 }
 
-void AppTask::WeatherModeEventHandler(AppEvent * event)
+void AppTask::ModeSelectEventHandler(AppEvent * event)
 {
-    VerifyOrReturn(event != nullptr && event->Type == AppEvent::kEventType_WeatherMode);
+    VerifyOrReturn(event != nullptr && event->Type == AppEvent::kEventType_ModeSelect);
 
-    const uint8_t mode = event->WeatherModeEvent.Mode;
-    if (mode > static_cast<uint8_t>(WeatherCondition::kNight))
+    const EndpointId endpoint = event->ModeSelectEvent.Endpoint;
+    const uint8_t mode = event->ModeSelectEvent.Mode;
+    if (endpoint == solar_power_endpoint)
     {
-        ChipLogError(AppServer, "Ignoring unsupported solar mode value %u", mode);
+        if (mode > static_cast<uint8_t>(DayProfile::kNight))
+        {
+            ChipLogError(AppServer, "Ignoring unsupported solar day profile %u", mode);
+            return;
+        }
+        const DayProfile requestedProfile = static_cast<DayProfile>(mode);
+        if (sDayProfile != requestedProfile)
+        {
+            sDayProfile = requestedProfile;
+            StartProfileRamp(true);
+            GetAppTask().RequestDemoScreenRefresh();
+        }
+    }
+    else if (endpoint == weather_endpoint)
+    {
+        if (mode > static_cast<uint8_t>(WeatherCondition::kOvercast))
+        {
+            ChipLogError(AppServer, "Ignoring unsupported solar weather mode %u", mode);
+            return;
+        }
+        const WeatherCondition requestedWeather = static_cast<WeatherCondition>(mode);
+        if (sWeather != requestedWeather)
+        {
+            sWeather = requestedWeather;
+            StartProfileRamp(false);
+            sAppLed.Set(sWeather == WeatherCondition::kClear);
+            GetAppTask().RequestDemoScreenRefresh();
+        }
+    }
+    else
         return;
-    }
 
-    const WeatherCondition requestedWeather = static_cast<WeatherCondition>(mode);
-    if (sWeather != requestedWeather)
-    {
-        sWeather = requestedWeather;
-        sAppLed.Set(sWeather == WeatherCondition::kClear);
-        GetAppTask().RequestDemoScreenRefresh();
-    }
-
-    if (event->WeatherModeEvent.UpdateMatterAttribute)
+    if (event->ModeSelectEvent.UpdateMatterAttribute)
     {
         const CHIP_ERROR err = DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t context) {
-            const uint8_t requestedMode = static_cast<uint8_t>(context);
-            const Status status = ModeSelect::Attributes::CurrentMode::Set(solar_power_endpoint, requestedMode);
+            const uint32_t packed = static_cast<uint32_t>(context);
+            const EndpointId endpointId = static_cast<EndpointId>(packed >> 8);
+            const uint8_t requestedMode = static_cast<uint8_t>(packed & 0xFF);
+            const Status status = ModeSelect::Attributes::CurrentMode::Set(endpointId, requestedMode);
             if (status != Status::Success)
             {
-                ChipLogError(AppServer, "Failed to set ModeSelect CurrentMode: status %u", to_underlying(status));
+                ChipLogError(AppServer, "Failed to set ModeSelect CurrentMode on endpoint %u: status %u",
+                             endpointId, to_underlying(status));
             }
-        }, static_cast<intptr_t>(mode));
+        }, static_cast<intptr_t>((static_cast<uint32_t>(endpoint) << 8) | mode));
         if (err != CHIP_NO_ERROR)
         {
             ChipLogError(AppServer, "Failed to schedule ModeSelect CurrentMode update: %s", ErrorStr(err));
@@ -500,31 +773,27 @@ void AppTask::GenerationTimerCallback(TimerHandle_t)
 void AppTask::GenerationTickEventHandler(AppEvent * event)
 {
     VerifyOrReturn(event->Type == AppEvent::kEventType_Timer);
-    // Compute “ideal” current from weather (outside CHIP stack).
-    int baseCurrent_mA = 0;
-    switch (sWeather)
+    if (sProfileRampElapsedSeconds < kProfileRampSeconds)
     {
-    case WeatherCondition::kClear:
-        baseCurrent_mA = kClearCurrent_mA;
-        break;
-    case WeatherCondition::kCloudy:
-        // 30-40% of clear
-        baseCurrent_mA = (kClearCurrent_mA * (30 + (rand() % 11))) / 100;
-        break;
-    case WeatherCondition::kNight:
-    default:
-        baseCurrent_mA = 0;
-        break;
+        sProfileRampElapsedSeconds = (sProfileRampElapsedSeconds + kUpdatePeriodSeconds < kProfileRampSeconds)
+            ? sProfileRampElapsedSeconds + kUpdatePeriodSeconds
+            : kProfileRampSeconds;
+        const int32_t delta = static_cast<int32_t>(sProfileRampTarget_W) - static_cast<int32_t>(sProfileRampStart_W);
+        sProfilePower_W = static_cast<uint32_t>(static_cast<int32_t>(sProfileRampStart_W) +
+            (delta * static_cast<int32_t>(sProfileRampElapsedSeconds)) / static_cast<int32_t>(kProfileRampSeconds));
     }
 
-    // Add small noise (+/-5%) to make readings feel “live”.
-    const int noisePermille = (static_cast<int>(rand() % 101) - 50); // -50..+50
-    sCurrentNoisy_mA        = baseCurrent_mA + (baseCurrent_mA * noisePermille) / 1000;
+    AdvanceCloudDip();
+    const uint32_t power_W = (sProfilePower_W * sDipMultiplierPermille) / 1000;
+    sCurrent_mA = (sVoltage_V == 0) ? 0 : static_cast<int>((power_W * 1000 + (sVoltage_V / 2)) / sVoltage_V);
+    sPower_mW = sVoltage_V * sCurrent_mA;
 
-    sPower_mW = sVoltage_V * sCurrentNoisy_mA;
-
-    const uint64_t periodic_mWh = static_cast<uint64_t>(sPower_mW) * update_period_seconds / 3600;
+    const uint64_t energyNumerator = static_cast<uint64_t>(sPower_mW) * kUpdatePeriodSeconds + sEnergyRemainder_mWSeconds;
+    const uint64_t periodic_mWh = energyNumerator / 3600;
+    sEnergyRemainder_mWSeconds = energyNumerator % 3600;
     sCumulativeEnergy_mWh += periodic_mWh;
+    sPendingPeriodicEnergy_mWh += periodic_mWh;
+    sEnergyReportElapsedSeconds += kUpdatePeriodSeconds;
 
     // Transfer readings to the CHIP thread (and into Matter clusters).
     auto * readings = chip::Platform::New<GeneratedReadings>();
@@ -533,12 +802,25 @@ void AppTask::GenerationTickEventHandler(AppEvent * event)
         return;
     }
     readings->voltage_V             = sVoltage_V;
-    readings->current_mA            = sCurrentNoisy_mA;
+    readings->current_mA            = sCurrent_mA;
     readings->power_mW              = sPower_mW;
-    readings->periodic_energy_mWh   = periodic_mWh;
+    readings->publish_energy       = sEnergyReportElapsedSeconds >= kEnergyReportPeriodSeconds;
+    readings->periodic_energy_mWh   = sPendingPeriodicEnergy_mWh;
     readings->cumulative_energy_mWh = sCumulativeEnergy_mWh;
 
-    DeviceLayer::PlatformMgr().ScheduleWork(ApplyMatterReadings, reinterpret_cast<intptr_t>(readings));
+    const CHIP_ERROR err = DeviceLayer::PlatformMgr().ScheduleWork(ApplyMatterReadings, reinterpret_cast<intptr_t>(readings));
+    if (err != CHIP_NO_ERROR)
+    {
+        ChipLogError(AppServer, "Failed to schedule solar readings update: %s", ErrorStr(err));
+        chip::Platform::Delete(readings);
+    }
+    else if (sEnergyReportElapsedSeconds >= kEnergyReportPeriodSeconds)
+    {
+        // Clear only after successful handoff. Allocation/scheduling failures
+        // retain the entire interval for the next attempt.
+        sPendingPeriodicEnergy_mWh = 0;
+        sEnergyReportElapsedSeconds = 0;
+    }
 }
 
 void AppTask::ApplyMatterReadings(intptr_t context)
@@ -548,10 +830,30 @@ void AppTask::ApplyMatterReadings(intptr_t context)
 
     // All Matter / cluster interaction happens on the CHIP thread.
     SolarPowerManager::UpdatePowerReading(readings->voltage_V, readings->current_mA, readings->power_mW);
-    SolarPowerManager::SendPeriodicEnergyReading(readings->periodic_energy_mWh);
-    SolarPowerManager::SendCumulativeEnergyReading(readings->cumulative_energy_mWh);
+    if (readings->publish_energy)
+    {
+        SolarPowerManager::SendPeriodicEnergyReading(readings->periodic_energy_mWh);
+        SolarPowerManager::SendCumulativeEnergyReading(readings->cumulative_energy_mWh);
+    }
 
     chip::Platform::Delete(readings);
+}
+
+const char * AppTask::DayProfileToString(DayProfile profile)
+{
+    switch (profile)
+    {
+    case DayProfile::kDawn:
+        return "Dawn";
+    case DayProfile::kPeak:
+        return "Peak";
+    case DayProfile::kDusk:
+        return "Dusk";
+    case DayProfile::kNight:
+        return "Night";
+    default:
+        return "Unknown";
+    }
 }
 
 const char * AppTask::WeatherToString(WeatherCondition condition)
@@ -560,13 +862,16 @@ const char * AppTask::WeatherToString(WeatherCondition condition)
     {
     case WeatherCondition::kClear:
         return "Clear";
-    case WeatherCondition::kCloudy:
-        return "Cloudy";
-    case WeatherCondition::kNight:
-        return "Night";
+    case WeatherCondition::kOvercast:
+        return "Overcast";
     default:
         return "Unknown";
     }
+}
+
+AppTask::DayProfile AppTask::GetDayProfile()
+{
+    return sDayProfile;
 }
 
 AppTask::WeatherCondition AppTask::GetWeather()

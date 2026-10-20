@@ -41,10 +41,16 @@ void MatterPostAttributeChangeCallback(const chip::app::ConcreteAttributePath & 
     switch (clusterId)
     {
     case ModeSelect::Id:
-        if (attributeId == ModeSelect::Attributes::CurrentMode::Id && size == sizeof(uint8_t) && value != nullptr &&
-            attributePath.mEndpointId == 1)
+        if (attributeId == ModeSelect::Attributes::CurrentMode::Id && size == sizeof(uint8_t) && value != nullptr)
         {
-            AppTask::PostWeatherMode(*value, false);
+            if (attributePath.mEndpointId == 1)
+            {
+                AppTask::PostDayProfileMode(*value, false);
+            }
+            else if (attributePath.mEndpointId == 2)
+            {
+                AppTask::PostWeatherMode(*value, false);
+            }
         }
         break;
 

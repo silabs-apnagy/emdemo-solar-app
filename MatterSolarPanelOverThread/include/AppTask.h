@@ -59,16 +59,26 @@ public:
 
     static AppTask & GetAppTask() { return sAppTask; }
 
-     enum class WeatherCondition : uint8_t
+    enum class DayProfile : uint8_t
     {
-        kClear  = 0,
-        kCloudy = 1,
-        kNight  = 2,
+        kDawn  = 0,
+        kPeak  = 1,
+        kDusk  = 2,
+        kNight = 3,
     };
 
+    enum class WeatherCondition : uint8_t
+    {
+        kClear    = 0,
+        kOvercast = 1,
+    };
+
+    static_assert(static_cast<uint8_t>(DayProfile::kDawn) == 0);
+    static_assert(static_cast<uint8_t>(DayProfile::kPeak) == 1);
+    static_assert(static_cast<uint8_t>(DayProfile::kDusk) == 2);
+    static_assert(static_cast<uint8_t>(DayProfile::kNight) == 3);
     static_assert(static_cast<uint8_t>(WeatherCondition::kClear) == 0);
-    static_assert(static_cast<uint8_t>(WeatherCondition::kCloudy) == 1);
-    static_assert(static_cast<uint8_t>(WeatherCondition::kNight) == 2);
+    static_assert(static_cast<uint8_t>(WeatherCondition::kOvercast) == 1);
 
     /**
      * @brief AppTask task main loop function
@@ -102,8 +112,11 @@ public:
      */
     static void SensorAttributeUpdateEvent(AppEvent * event);
 
-    static const char * WeatherToString(WeatherCondition condition);    
+    static const char * DayProfileToString(DayProfile profile);
+    static const char * WeatherToString(WeatherCondition condition);
+    static DayProfile GetDayProfile();
     static WeatherCondition GetWeather();
+    static void PostDayProfileMode(uint8_t mode, bool updateMatterAttribute);
     static void PostWeatherMode(uint8_t mode, bool updateMatterAttribute);
 
     void RequestDemoScreenRefresh();
@@ -126,7 +139,7 @@ private:
 
     // AppTask event handler (runs on the AppTask thread). Computes new readings outside the CHIP stack.
     static void GenerationTickEventHandler(AppEvent * event);
-    static void WeatherModeEventHandler(AppEvent * event);
+    static void ModeSelectEventHandler(AppEvent * event);
 
      // CHIP-thread work item that pushes readings into Matter clusters.
     static void ApplyMatterReadings(intptr_t context);
@@ -136,6 +149,7 @@ private:
 
     static AppTask sAppTask;
 
+    static DayProfile sDayProfile;
     static WeatherCondition sWeather;
     static TimerHandle_t sGenerationTimer;
 
@@ -144,6 +158,7 @@ private:
         int voltage_V;
         int current_mA;
         int power_mW;
+        bool publish_energy;
         uint64_t periodic_energy_mWh;
         uint64_t cumulative_energy_mWh;
     };

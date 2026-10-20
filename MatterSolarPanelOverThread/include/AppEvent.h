@@ -33,7 +33,7 @@ struct AppEvent : public BaseAppEvent
   {
     kEventType_Button = 0,
     kEventType_Timer,
-    kEventType_WeatherMode
+    kEventType_ModeSelect
   };
 
   uint16_t Type;
@@ -50,9 +50,10 @@ struct AppEvent : public BaseAppEvent
     } TimerEvent;
     struct
     {
+      uint16_t Endpoint;
       uint8_t Mode;
       bool UpdateMatterAttribute;
-    } WeatherModeEvent;
+    } ModeSelectEvent;
   };
   EventHandler Handler;
 };

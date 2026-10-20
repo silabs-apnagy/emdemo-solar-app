@@ -1,11 +1,11 @@
 # Solar firmware — conference 2.0 preview
 
 Checkpoint: **2026-10-20**. Feature scope is frozen; bug fixes/validation only.
-Working branch: `SolarPanel2.0`. Current committed base: `b524b26`; the features
-below include uncommitted local changes and require a component commit before
-updating the energy-management super-repo's solar pin.
+Working branch: `SolarPanel2.0`. Behavior baseline: `12ce422`. The operator confirms
+the currently running firmware represents the demo behavior below; that behavior
+is now committed. Exact flashed artifact hashes are separate release records.
 
-## Current local behavior
+## Current demo behavior
 
 - xG24 / BRD4187C Matter-over-Thread solar simulation.
 - Endpoint 1 Mode Select: Dawn, Peak, Dusk, Night. Endpoint 2 Mode Select:
@@ -26,11 +26,11 @@ updating the energy-management super-repo's solar pin.
 
 - App build succeeded on October 20 after the reliability changes.
 - Updated app artifact: `MatterSolarPanelOverThread/artifact/MatterSolarPanelOverThread.s37`.
-  This build was not flashed by the agent; do not assume older copied/full-solution
-  artifacts contain it.
+  No flashing was done during bookkeeping. The operator confirms the running
+  baseline; do not assume older copied/full-solution artifacts contain it.
 - Keep the correct bootloader/application pair; no erase/recommission was performed.
 - Validate ten-second energy totals, live power, mode reports, and RF subscription
-  recovery after flashing. Previous Pi inspection confirmed a solar subscription
+  recovery during the release soak. Previous Pi inspection confirmed a solar subscription
   outage and high MAC retries; report throttling is mitigation, not proof of a fix.
 - No global simulated clock, custom transport, or new cluster extension is added.
 
